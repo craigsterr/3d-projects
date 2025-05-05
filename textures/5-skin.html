@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <link rel="icon" href="data:,">
+    <title>Skeletal Animation</title>
+    <!-- from cs418.cs.illinois.edu -->
+    <script src="math.js"></script>
+
+
+<!-- The source code of a vertex shader directly in the HTML. The 'type=' command can have any value except "javascript" and just tells the browser not to try to run the code as javascript. -->
+<script id="vert" type="glsl">
+#version 300 es
+layout(location=0) in vec4 position;
+layout(location=1) in vec3 vcolor;
+layout(location=2) in vec3 weight;
+out vec3 color;
+uniform mat4 v;
+uniform mat4 T;
+uniform mat4 C;
+uniform mat4 F;
+uniform mat4 p;
+void main() {
+    gl_Position = p * (v*(T*weight[0] + C*weight[1] + F*weight[2])) * position;
+    color = vcolor;
+}
+</script>
+
+
+<!-- The source code of a fragment shader. -->
+<script id="frag" type="glsl">
+#version 300 es
+precision highp float;
+in vec3 color;
+out vec4 fragColor;
+void main() {
+    fragColor = gl_FrontFacing ? vec4(color,1) : vec4(0,0,0,1);
+}
+</script>
+
+
+<!-- Code I don't expect to change. -->
+<script>
+const IlliniBlue = new Float32Array([0.075, 0.16, 0.292, 1])
+const IlliniOrange = new Float32Array([1, 0.373, 0.02, 1])
+const IdentityMatrix = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
+
+/**
+ * Given the source code of a vertex and fragment shader, compiles them,
+ * and returns the linked program.
+ */
+function compileShader(vs_source, fs_source) {
+    const vs = gl.createShader(gl.VERTEX_SHADER)
+    gl.shaderSource(vs, vs_source)
+    gl.compileShader(vs)
+    if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(vs))
+        throw Error("Vertex shader compilation failed")
+    }
+
+    const fs = gl.createShader(gl.FRAGMENT_SHADER)
+    gl.shaderSource(fs, fs_source)
+    gl.compileShader(fs)
+    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(fs))
+        throw Error("Fragment shader compilation failed")
+    }
+
+    const program = gl.createProgram()
+    gl.attachShader(program, vs)
+    gl.attachShader(program, fs)
+    gl.linkProgram(program)
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program))
+        throw Error("Linking failed")
+    }
+    
+    const uniforms = {}
+    for(let i=0; i<gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); i+=1) {
+        let info = gl.getActiveUniform(program, i)
+        uniforms[info.name] = gl.getUniformLocation(program, info.name)
+    }
+    program.uniforms = uniforms
+
+    return program
+}
+
+/**
+ * Sends per-vertex data to the GPU and connects it to a VS input
+ * 
+ * @param data    a 2D array of per-vertex data (e.g. [[x,y,z,w],[x,y,z,w],...])
+ * @param loc     the layout location of the vertex shader's `in` attribute
+ * @param mode    (optional) gl.STATIC_DRAW, gl.DYNAMIC_DRAW, etc
+ * 
+ * @returns the ID of the buffer in GPU memory; useful for changing data later
+ */
+function supplyDataBuffer(data, loc, mode) {
+    if (mode === undefined) mode = gl.STATIC_DRAW
+    
+    const buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    const f32 = new Float32Array(data.flat())
+    gl.bufferData(gl.ARRAY_BUFFER, f32, mode)
+    
+    gl.vertexAttribPointer(loc, data[0].length, gl.FLOAT, false, 0, 0)
+    gl.enableVertexAttribArray(loc)
+    
+    return buf;
+}
+
+/**
+ * Creates a Vertex Array Object and puts into it all of the data in the given
+ * JSON structure, which should have the following form:
+ * 
+ * ````
+ * {"triangles": a list of of indices of vertices
+ * ,"attributes":
+ *  [ a list of 1-, 2-, 3-, or 4-vectors, one per vertex to go in location 0
+ *  , a list of 1-, 2-, 3-, or 4-vectors, one per vertex to go in location 1
+ *  , ...
+ *  ]
+ * }
+ * ````
+ * 
+ * @returns an object with four keys:
+ *  - mode = the 1st argument for gl.drawElements
+ *  - count = the 2nd argument for gl.drawElements
+ *  - type = the 3rd argument for gl.drawElements
+ *  - vao = the vertex array object for use with gl.bindVertexArray
+ */
+function setupGeomery(geom) {
+    var triangleArray = gl.createVertexArray()
+    gl.bindVertexArray(triangleArray)
+
+    for(let i=0; i<geom.attributes.length; i+=1) {
+        let data = geom.attributes[i]
+        supplyDataBuffer(data, i)
+    }
+
+    var indices = new Uint16Array(geom.triangles.flat())
+    var indexBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+
+    return {
+        mode: gl.TRIANGLES,
+        count: indices.length,
+        type: gl.UNSIGNED_SHORT,
+        vao: triangleArray
+    }
+}
+</script>
+
+<!-- All the other code in one big script element. -->
+
+<script>
+function makeLeg(rings, n, len, rad, footLen) {
+    var leg =
+        {"triangles":[]
+        ,"attributes":[[],[],[]]
+        ,"joints":
+            {"hip":[0,len/2,0]
+            ,"knee":[0,0,0]
+            ,"ankle":[0,rad-len/2,0]
+            }
+        }
+    let r = [
+        leg.joints.knee[1] + rad,
+        leg.joints.knee[1] - rad,
+        leg.joints.ankle[1] + rad,
+        rad-len/2
+    ]
+    for(let ring=0; ring<=rings; ring+=1) {
+        let y = ring*len/rings - len/2
+        for(let pt=0; pt<n; pt+=1) {
+            let angle = pt*Math.PI*2/n
+            let x = Math.cos(angle)*rad
+            let z = Math.sin(angle)*rad
+            leg.attributes[0].push([x,y,z])
+            leg.attributes[1].push([Math.random(),Math.random(),Math.random()])
+            if (y > r[0]) {
+                leg.attributes[2].push([1,0,0])
+            } else if (y > r[1]) {
+                let t = (y-r[1])/(r[0]-r[1])
+                leg.attributes[2].push([t,1-t,0])
+            } else if (y > r[2]) {
+                leg.attributes[2].push([0,1,0])
+            } else if (y > r[3]) {
+                let t = (y-r[3])/(r[2]-r[3])
+                leg.attributes[2].push([0,t,1-t])
+            } else {
+                leg.attributes[2].push([0,0,1])
+            }
+            
+            if(ring > 0) {
+                let i = n*ring + pt
+                let i1 = n*ring + (pt + 1)%n
+                leg.triangles.push([i,i1,i-n])
+                leg.triangles.push([i1-n,i-n,i1])
+            }
+        }
+    }
+    let footRings = Math.ceil(rings*footLen/len)
+    for(let ring=0; ring<=footRings; ring+=1) {
+        let x = ring*footLen/footRings - rad
+        for(let pt=0; pt<n; pt+=1) {
+            let angle = pt*Math.PI*2/n
+            let y = Math.cos(angle)*rad - len/2
+            let z = Math.sin(angle)*rad
+            leg.attributes[0].push([x,y,z])
+            leg.attributes[1].push([Math.random(),Math.random(),Math.random()])
+            leg.attributes[2].push([0,0,1])
+            if(ring > 0) {
+                let i = n*ring + pt + (rings+1)*n
+                let i1 = n*ring + (pt + 1)%n + (rings+1)*n
+                leg.triangles.push([i,i-n,i1])
+                leg.triangles.push([i1-n,i1,i-n])
+            }
+        }
+    }
+    return leg
+}
+
+const keyframes =
+    [{'hip':[0,0,0]
+     ,'thigh':m4toQ(m4rotZ(0))
+     ,'calf':m4toQ(m4rotZ(0))
+     ,'foot':m4toQ(m4rotZ(0))
+     }
+    ,{'hip':[0,2,0]
+     ,'thigh':m4toQ(m4rotZ(1.5))
+     ,'calf':m4toQ(m4rotZ(-1.5))
+     ,'foot':m4toQ(m4rotZ(-1))
+     }
+    ,{'hip':[0,2,0]
+     ,'thigh':m4toQ(m4rotX(-1.5))
+     ,'calf':m4toQ(m4rotZ(-1.5))
+     ,'foot':m4toQ(m4rotZ(-1))
+     }
+    ]
+
+/** Draw one frame */
+function draw(seconds) {
+    gl.clearColor(...IlliniBlue) // f(...[1,2,3]) means f(1,2,3)
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+    gl.useProgram(program)
+
+    gl.bindVertexArray(geom.vao)
+    
+    let s = seconds % keyframes.length
+    let f1 = Math.floor(s)
+    let f2 = (1+f1) % keyframes.length
+    let t = s-f1
+    let hip = lerp(t, keyframes[f1].hip, keyframes[f2].hip)
+    let thigh = qlerp(t, keyframes[f1].thigh, keyframes[f2].thigh)
+    let calf = qlerp(t, keyframes[f1].calf, keyframes[f2].calf)
+    let foot = qlerp(t, keyframes[f1].foot, keyframes[f2].foot)
+
+    let T = m4mul(
+        m4trans(...hip),
+        m4fromQ(thigh),
+        m4trans(-leg.joints.hip[0],-leg.joints.hip[1],-leg.joints.hip[2])
+    )
+    let C = m4mul(
+        T,
+        m4trans(...leg.joints.knee),
+        m4fromQ(calf),
+        m4trans(-leg.joints.knee[0],-leg.joints.knee[1],-leg.joints.knee[2])
+    )
+    let F = m4mul(
+        C,
+        m4trans(...leg.joints.ankle),
+        m4fromQ(foot),
+        m4trans(-leg.joints.ankle[0],-leg.joints.ankle[1],-leg.joints.ankle[2])
+    )
+
+    let v = m4view([1,2,3], [0,0,0], [0,1,0])
+    gl.uniformMatrix4fv(program.uniforms.v, false, v)
+    gl.uniformMatrix4fv(program.uniforms.T, false, T)
+    gl.uniformMatrix4fv(program.uniforms.C, false, C)
+    gl.uniformMatrix4fv(program.uniforms.F, false, F)
+    gl.uniformMatrix4fv(program.uniforms.p, false, p)
+    
+    gl.drawElements(geom.mode, geom.count, geom.type, 0)
+
+}
+
+/** Compute any time-varying or animated aspects of the scene */
+function tick(milliseconds) {
+    let seconds = milliseconds / 1000;
+
+    draw(seconds)
+    requestAnimationFrame(tick)
+}
+
+/** Resizes the canvas to completely fill the screen */
+function fillScreen() {
+    let canvas = document.querySelector('canvas')
+    document.body.style.margin = '0'
+    canvas.style.width = '100vw'
+    canvas.style.height = '100vh'
+    canvas.width = canvas.clientWidth
+    canvas.height = canvas.clientHeight
+    canvas.style.width = ''
+    canvas.style.height = ''
+    if (window.gl) {
+        gl.viewport(0,0, canvas.width, canvas.height)
+        window.p = m4perspNegZ(0.1, 10, 1.5, canvas.width, canvas.height)
+    }
+}
+
+/** Compile, link, set up geometry */
+window.addEventListener('load', async (event) => {
+    window.gl = document.querySelector('canvas').getContext('webgl2',
+        {antialias: false, depth:true, preserveDrawingBuffer:true}
+    )
+    let vs = document.querySelector('#vert').textContent.trim()
+    let fs = document.querySelector('#frag').textContent.trim()
+    window.program = compileShader(vs,fs)
+    gl.enable(gl.DEPTH_TEST)
+    window.leg = makeLeg(120, 120, 4, 0.5, 2)
+    window.geom = setupGeomery(leg)
+    fillScreen()
+    window.addEventListener('resize', fillScreen)
+    requestAnimationFrame(tick)
+})
+
+</script>
+</head>
+<body><canvas width="500" height="500"></canvas></body>
+</html>
